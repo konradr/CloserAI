@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Request
+from fastapi.responses import HTMLResponse
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
@@ -193,6 +195,12 @@ async def health() -> dict:
     return {"status": "ok", "public_url": PUBLIC_URL, "active_bots": list(sessions)}
 
 
+@app.get("/", response_class=HTMLResponse)
+async def dashboard() -> str:
+    """Serve the CloserAI control dashboard."""
+    return (Path(__file__).parent / "static" / "dashboard.html").read_text()
+
+
 @app.post("/start-call")
 async def start_call(req: StartCall) -> dict:
     # 1. Pre-call context (CRM + web intel) from the CRM service.
@@ -241,9 +249,11 @@ async def say(bot_id: str, req: Say) -> dict:
 
 @app.get("/history/{bot_id}")
 async def get_history(bot_id: str) -> dict:
-    """Inspect the running conversation memory for a call."""
-    session = sessions.get(bot_id, {})
-    return {"bot_id": bot_id, "history": session.get("history", [])}
+    """Inspect the running conversation memory for a call. active=False once it ended."""
+    session = sessions.get(bot_id)
+    if session is None:
+        return {"bot_id": bot_id, "active": False, "history": []}
+    return {"bot_id": bot_id, "active": True, "history": session.get("history", [])}
 
 
 @app.post("/leave/{bot_id}")
@@ -280,16 +290,63 @@ async def _handle_utterance(bot_id: str, speaker: str, sentence: str) -> None:
     if not session:
         return
     print(f"[meet] {speaker}: {sentence}")
+    goodbye = _is_goodbye(sentence)
     answer = await fast_reply(session, sentence)
-
-    if not answer or "[SILENT]" in answer:
-        return
     history: list[str] = session.setdefault("history", [])
+
+    # Stay silent only if there's nothing to say AND it's not a goodbye.
+    if (not answer or "[SILENT]" in answer) and not goodbye:
+        return
+    if not answer or "[SILENT]" in answer:
+        answer = "Thanks so much — take care and talk soon!"
+
     history.append(f"{speaker}: {sentence}")
     history.append(f"CloserAI: {answer}")
     print(f"[meet] CloserAI says: {answer}")
     audio = await slng.synthesize_mp3(answer)
     await recall.output_audio(bot_id, audio)
+
+    # Wrap up if the agent called end_call, OR the prospect clearly said goodbye.
+    pending = session.pop("_pending_end", None)
+    should_end = pending is not None or goodbye
+    if should_end and not session.get("_ending"):
+        session["_ending"] = True  # set before any await — blocks duplicate wrap-ups
+        summary = pending["summary"] if pending else await _auto_summary(session)
+        task = pending["task"] if pending else "Send proposal and pricing"
+        await asyncio.sleep(2)  # let the goodbye finish, then end
+        await _wrap_up_call(bot_id, summary, task)
+
+
+_GOODBYE_PHRASES = (
+    "bye", "goodbye", "good bye", "see you", "see ya", "talk later",
+    "talk to you later", "catch you later", "gotta go", "got to go",
+    "have to go", "that's all", "thats all", "speak soon", "take care",
+    "end the call", "cut the call", "hang up",
+)
+
+
+def _is_goodbye(text: str) -> bool:
+    t = f" {text.lower().strip()} "
+    return any(f"{p}" in t for p in _GOODBYE_PHRASES)
+
+
+async def _auto_summary(session: dict) -> str:
+    """One-line call summary from the conversation (fast, no tools)."""
+    convo = "\n".join(session.get("history", []))
+    if not convo:
+        return "Call completed."
+    try:
+        r = await _gemini.aio.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=f"Summarise this sales call in ONE sentence (outcome + next step):\n{convo}",
+            config=types.GenerateContentConfig(
+                max_output_tokens=80,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        return (r.text or "Call completed.").strip()
+    except Exception:  # noqa: BLE001
+        return "Call completed."
 
     # If the agent decided the call is over, let the goodbye play, then wrap up.
     pending = session.pop("_pending_end", None)
@@ -304,22 +361,30 @@ async def end_call(bot_id: str, req: EndCall) -> dict:
 
 
 async def _wrap_up_call(bot_id: str, summary: str, task: str = "Send proposal and pricing") -> dict:
-    """Autonomous end-of-call: summary note + deal advance + task + full transcript, then leave."""
-    session = sessions.get(bot_id, {})
+    """Autonomous end-of-call: leave first (fast), then write note + deal + task + transcript."""
+    # Pop the session up front so the bot can't be wrapped up twice and the
+    # dashboard immediately sees the call as ended.
+    session = sessions.pop(bot_id, None)
+    if session is None:
+        return {"bot_id": bot_id, "already_ended": True}
     email = session.get("email")
     history: list[str] = session.get("history", [])
+
+    # 1. Leave the meeting right away so the bot doesn't linger during CRM writes.
+    await recall.leave_call(bot_id)
+
     result = {}
     transcript_saved = False
     if email:
         async with httpx.AsyncClient(timeout=120) as client:
-            # 1. Summary note + deal advance + follow-up task.
+            # 2. Summary note + deal advance + follow-up task.
             r = await client.post(
                 f"{CRM_URL}/crm/post-call",
                 json={"email": email, "summary": summary, "task": task},
             )
             result = r.json()
 
-            # 2. Persist the FULL conversation transcript as its own note.
+            # 3. Persist the FULL conversation transcript as its own note.
             if history:
                 transcript = "\n".join(history)
                 q = (
@@ -331,8 +396,6 @@ async def _wrap_up_call(bot_id: str, summary: str, task: str = "Send proposal an
                 tr = await client.post(f"{CRM_URL}/crm/ask", json={"query": q})
                 transcript_saved = "error" not in tr.json()
 
-    await recall.leave_call(bot_id)
-    sessions.pop(bot_id, None)
     print(
         f"[meet] END CALL {bot_id} | bot left | "
         f"crm: {result.get('answer', result)} | "
