@@ -1,102 +1,253 @@
 # CloserAI
 
-An autonomous AI sales agent that joins live calls, listens, speaks, and updates the CRM — built at the Tech:Europe London AI Hackathon.
+**An autonomous AI sales agent that joins your live video calls, talks to the prospect in real time, researches them on the fly, and updates your CRM completely on its own.**
 
-This repo is split into independent components that connect over simple HTTP:
+Built at the Tech:Europe London AI Hackathon.
 
-| Component | Owner | What it does |
-|-----------|-------|--------------|
-| **`crm/`** | Harish | CRM intelligence — Attio via MCP + Gemini. Pre-call briefs and autonomous CRM actions. |
-| **voice / meet** | Partner | Joins the Google Meet, streams transcript, speaks responses. Calls the CRM component. |
+CloserAI drops into a Google Meet as a real participant. It listens to the conversation, reasons with Gemini, speaks back with a natural voice, looks up live web intel and CRM facts mid-call, and — when the call wraps up — logs a note, advances the deal, creates a follow-up task, and saves the full transcript to the CRM. Zero clicks.
 
 ---
 
-## The `crm` component
+## What it does
 
-A self-contained CRM brain. It talks to **Attio's hosted MCP server** (OAuth) and uses **Gemini** to reason over 37 Attio tools — searching contacts/deals, logging notes, creating tasks, updating stages — all in natural language. No Attio API knowledge needed by callers.
+1. **Pre-call** — given a prospect's email, it builds a brief from the CRM (Attio) and live web research (Tavily) before the bot even joins.
+2. **In-call** — it joins the Meet (Recall.ai), receives the live transcript, replies in ~1s with Gemini, speaks via SLNG, and can research the web or query the CRM when it needs a fact.
+3. **Post-call** — it detects the goodbye, leaves on its own, then autonomously writes back to the CRM: summary note, deal stage advance, follow-up task, and the full transcript.
 
-### Two ways to use it
+---
 
-#### 1. As an HTTP service (recommended for the voice/Meet side)
+## Architecture
+
+```mermaid
+flowchart LR
+    Meet[Google Meet] -- audio/transcript --> Recall[Recall.ai bot]
+    Recall -- transcript webhook --> Orch[meet orchestrator :8200]
+    Orch -- reply --> Gemini[Gemini 2.5 Flash]
+    Gemini -- web_research --> Tavily[Tavily]
+    Gemini -- crm_lookup / post-call --> CRM[crm service :8100]
+    CRM -- MCP / OAuth --> Attio[Attio CRM]
+    Orch -- text --> SLNG[SLNG TTS]
+    SLNG -- mp3 --> Recall
+    Recall -- speaks --> Meet
+```
+
+Two independent services that talk over HTTP:
+
+| Service | Port | Responsibility |
+|---------|------|----------------|
+| **`crm/`** | 8100 | CRM brain — Attio (hosted MCP, OAuth) + Gemini over 37 Attio tools. Pre-call briefs, web research, autonomous CRM writes. |
+| **`meet/`** | 8200 | Meet orchestrator — Recall.ai bot, live transcript, Gemini reasoning, SLNG voice, and a live web dashboard. Calls the CRM service. |
+
+---
+
+## Call flow
+
+End-to-end lifecycle of a single sales call:
+
+```mermaid
+sequenceDiagram
+    actor Rep as Sales rep
+    participant Dash as Dashboard
+    participant Orch as Orchestrator
+    participant CRM as CRM service
+    participant Attio
+    participant Tavily
+    participant Recall as Recall.ai
+    participant Meet as Google Meet
+    participant Gemini
+    participant SLNG
+
+    Rep->>Dash: Meet link + prospect email
+    Dash->>Orch: POST /start-call
+
+    rect rgb(225,238,255)
+    note right of Orch: Pre-call
+    Orch->>CRM: GET /crm/precall
+    CRM->>Attio: search contact + deals (MCP)
+    CRM->>Tavily: research company
+    CRM-->>Orch: brief + web intel
+    Orch->>Recall: create bot (webhook)
+    Recall->>Meet: join as participant
+    end
+
+    rect rgb(224,245,233)
+    note right of Orch: In-call loop
+    Meet-->>Recall: prospect speaks
+    Recall->>Orch: POST /webhook/transcript
+    Orch->>Gemini: reason (context + history)
+    Gemini-->>Orch: reply (or tool: web_research / crm_lookup / end_call)
+    Orch->>SLNG: text → mp3
+    SLNG-->>Orch: audio
+    Orch->>Recall: output_audio
+    Recall->>Meet: bot speaks
+    end
+
+    rect rgb(255,228,232)
+    note right of Orch: Post-call
+    Meet-->>Recall: "thanks, bye"
+    Recall->>Orch: transcript (goodbye)
+    Orch->>Recall: leave call
+    Orch->>CRM: POST /crm/post-call
+    CRM->>Attio: note + advance deal + task + transcript
+    Orch-->>Dash: call ended
+    end
+```
+
+---
+
+## Partner technologies
+
+- **Attio** — CRM, driven entirely through its hosted **MCP** server over OAuth (no hand-written API calls).
+- **Gemini** (`google-genai`, `gemini-2.5-flash`) — real-time reasoning, function calling, and call summaries. Thinking disabled for sub-second replies.
+- **Tavily** — live web research on the prospect's company (news, funding, competitors).
+- **Recall.ai** — sends the bot into Google Meet, streams the transcript, and plays the bot's voice (region `eu-central-1`).
+- **SLNG** — natural text-to-speech (Deepgram Aura voice), rendered to MP3 for Recall.
+
+---
+
+## Quick start
+
+### 1. Install
 
 ```bash
 cd CloserAI
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env          # add your GOOGLE_API_KEY
+cp .env.example .env        # fill in the keys below
+```
+
+Requires `ffmpeg` on the PATH (SLNG audio is converted WAV→MP3):
+
+```bash
+brew install ffmpeg
+```
+
+### 2. Configure `.env`
+
+```env
+# Gemini (Google AI Studio / Developer API key)
+GOOGLE_API_KEY=your_gemini_key
+GEMINI_MODEL=gemini-2.5-flash
+
+# Tavily (pre-call + in-call web research)
+TAVILY_API_KEY=your_tavily_key
+
+# Recall.ai (Google Meet bot)
+RECALL_API_KEY=your_recall_key
+RECALL_REGION=eu-central-1
+
+# SLNG (text-to-speech)
+SLNG_API_KEY=your_slng_key
+SLNG_VOICE=aura-2-thalia-en
+
+# Service wiring
+CRM_URL=http://localhost:8100
+PUBLIC_URL=                      # public https URL of the orchestrator (for Recall webhooks)
+```
+
+Attio needs **no API key** — the CRM service authenticates to Attio MCP via OAuth (a browser login opens once on first run; the token is cached in `.attio_mcp_token.json`).
+
+### 3. Run the three processes
+
+```bash
+# Terminal 1 — CRM brain
 uvicorn crm.service:app --port 8100
-# first run opens a browser once to log into Attio (token cached after)
+
+# Terminal 2 — public tunnel so Recall.ai can reach the transcript webhook
+cloudflared tunnel --url http://localhost:8200 --protocol http2
+#   copy the printed https URL into PUBLIC_URL in .env
+
+# Terminal 3 — Meet orchestrator
+uvicorn meet.app:app --port 8200
 ```
 
-Then your code just makes HTTP calls:
+Open the dashboard at **http://localhost:8200**, paste a Google Meet link and a contact email, and hit **Start Call**.
 
-```
-GET  /health
-GET  /crm/context?email=john@northwind.io
-POST /crm/ask     {"query": "Log a note on John Smith: ready for proposal"}
-```
+---
 
-**Pre-call brief** (call this when the bot joins):
+## The `crm` service (port 8100)
+
+A self-contained CRM brain. It reasons over Attio's hosted MCP tools with Gemini — searching contacts and deals, logging notes, creating tasks, advancing stages — all in natural language.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /health` | liveness |
+| `GET /crm/context?email=` | pre-call brief from the CRM |
+| `GET /crm/precall?email=` | brief **+** Tavily web intel |
+| `POST /crm/ask` `{"query": "..."}` | any CRM action/question in plain English |
+| `POST /crm/post-call` `{"email","summary","task"}` | autonomous wrap-up: note + deal advance + task |
+
+Example:
+
 ```bash
-curl "http://localhost:8100/crm/context?email=john@northwind.io"
+curl "http://localhost:8100/crm/precall?email=sarah@brightwave.com"
 ```
 ```json
 {
-  "email": "john@northwind.io",
-  "brief": "John Smith, VP of Sales at Northwind. Open deal: CloserAI Enterprise, In Progress, $48,000. Most recent note: Discovery call done..."
+  "email": "sarah@brightwave.com",
+  "brief": "Sarah Chen, Head of Revenue Operations at BrightWave SaaS. Open deal: CloserAI Growth (In Progress, $72,000). Most recent note: ready to move forward.",
+  "web_intel": "WEB INTEL (Tavily): Brightwave Secures $15M Series A ..."
 }
 ```
 
-**Any CRM action** (call this during/after the call):
-```bash
-curl -X POST http://localhost:8100/crm/ask \
-  -H "Content-Type: application/json" \
-  -d '{"query": "Log a note on John Smith: great demo, advance the deal to proposal"}'
-```
-```json
-{
-  "answer": "Logged the note and moved the Northwind deal to Proposal.",
-  "tool_calls": [{"name": "search-records", "args": {}}, {"name": "create-note", "args": {}}]
-}
-```
-
-#### 2. As a Python library (in-process)
+### As a Python library
 
 ```python
 from crm import CRMAgent
 
 async with CRMAgent() as agent:
-    brief  = await agent.get_context("john@northwind.io")   # pre-call brief (str)
-    result = await agent.ask("Create a task to follow up with John in 2 days")
+    brief  = await agent.get_context("sarah@brightwave.com")
+    result = await agent.ask("Create a task to follow up with Sarah in 2 days")
     print(result["answer"], result["tool_calls"])
 ```
 
-### Integration contract (for the voice / Google Meet side)
+---
 
-Your code never touches Attio or MCP. The flow:
+## The `meet` orchestrator (port 8200)
 
-1. **Bot joins the call** → `GET /crm/context?email=<prospect>` → speak the brief / prime the agent.
-2. **During the call** → when you need CRM info, `POST /crm/ask` with a plain-English question.
-3. **Call ends** → `POST /crm/ask` with the call summary and the action (log note, advance deal, create follow-up task). The agent does it autonomously.
+Wires Recall.ai transcript → Gemini reasoning → SLNG voice, with a live dashboard.
 
-That's the whole surface: `/crm/context` and `/crm/ask`.
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /` | control dashboard (pre-call brief + live conversation feed) |
+| `POST /start-call` `{"meeting_url","contact_email"}` | build brief, send the bot to the Meet |
+| `POST /say/{bot_id}` `{"text"\|"prompt"}` | make the bot speak exact text, or let it reason |
+| `GET /history/{bot_id}` | live conversation memory (`active` flag) |
+| `POST /end-call/{bot_id}` `{"summary","task"}` | end + autonomous CRM wrap-up |
+| `POST /leave/{bot_id}` | leave immediately (no CRM writes) |
+| `POST /webhook/transcript` | Recall.ai real-time transcript sink |
+
+During a call the agent has a small toolset it uses only when needed:
+- **`web_research`** — fresh external facts via Tavily
+- **`crm_lookup`** — a specific CRM detail via the CRM service
+- **`end_call`** — wrap up autonomously when the conversation is clearly over
+
+Goodbye is also detected deterministically, so the bot never lingers.
 
 ---
 
-## Configuration
+## Repo layout
 
-`.env`:
-```env
-GOOGLE_API_KEY=your_gemini_dev_key
-GEMINI_MODEL=gemini-2.5-flash
 ```
-
-Attio needs **no API key** here — the component authenticates to Attio MCP via OAuth (browser login on first run; token cached in `.attio_mcp_token.json`).
+CloserAI/
+├── crm/                # CRM brain (Attio MCP + Gemini)
+│   ├── agent.py        # CRMAgent: get_context, precall, ask, post_call
+│   ├── service.py      # FastAPI service (:8100)
+│   ├── oauth.py        # Attio MCP OAuth + schema conversion
+│   ├── research.py     # Tavily web research
+│   └── config.py
+├── meet/               # Meet orchestrator (:8200)
+│   ├── app.py          # fast_reply, transcript webhook, wrap-up, dashboard
+│   ├── recall.py       # Recall.ai bot: create, speak, leave
+│   ├── slng.py         # SLNG TTS (WAV→MP3 via ffmpeg)
+│   └── static/dashboard.html
+├── docs/INTEGRATION.md
+├── requirements.txt
+└── .env.example
+```
 
 ---
 
 ## Tech
 
-- **Attio MCP** — hosted CRM tools over the Model Context Protocol (OAuth)
-- **Gemini** (`google-genai`) — reasoning + function calling over the Attio tools
-- **FastAPI** — the HTTP service wrapper
+FastAPI · httpx · Attio MCP (OAuth) · `google-genai` (Gemini 2.5 Flash) · Tavily · Recall.ai · SLNG · ffmpeg · cloudflared
