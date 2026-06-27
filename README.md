@@ -102,9 +102,9 @@ sequenceDiagram
 - **Attio** — CRM, driven entirely through its hosted **MCP** server over OAuth (no hand-written API calls).
 - **Gemini** (`google-genai`, `gemini-2.5-flash`) — real-time reasoning, function calling, and call summaries. Thinking disabled for sub-second replies.
 - **Tavily** — live web research on the prospect's company (news, funding, competitors).
-- **Recall.ai** — sends the bot into Google Meet, streams the transcript, and plays the bot's voice (region `eu-central-1`).
 - **SLNG** — natural text-to-speech (Deepgram Aura voice), rendered to MP3 for Recall.
-
+## Other technology
+- **Recall.ai** — sends the bot into Google Meet, streams audio.
 ---
 
 ## Quick start
