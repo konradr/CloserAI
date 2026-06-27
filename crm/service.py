@@ -53,13 +53,19 @@ async def health() -> dict:
 
 @app.get("/crm/context")
 async def crm_context(email: str) -> dict:
-    async with _lock:
-        brief = await _agent.get_context(email)
-    return {"email": email, "brief": brief}
+    try:
+        async with _lock:
+            brief = await _agent.get_context(email)
+        return {"email": email, "brief": brief}
+    except Exception as exc:  # noqa: BLE001
+        return {"email": email, "brief": None, "error": str(exc)[:300]}
 
 
 @app.post("/crm/ask")
 async def crm_ask(req: AskRequest) -> dict:
-    async with _lock:
-        result = await _agent.ask(req.query)
-    return {"answer": result["answer"], "tool_calls": result["tool_calls"]}
+    try:
+        async with _lock:
+            result = await _agent.ask(req.query)
+        return {"answer": result["answer"], "tool_calls": result["tool_calls"]}
+    except Exception as exc:  # noqa: BLE001
+        return {"answer": None, "tool_calls": [], "error": str(exc)[:300]}
