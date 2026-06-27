@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CloserAI — Autonomous Sales Agent</title>
+<style>
+  :root { --bg:#0c0d10; --panel:#15171c; --line:#24262e; --txt:#e8eaed; --mut:#8b8f9a;
+          --accent:#5b8cff; --green:#36d399; --red:#ff5b6e; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt);
+         font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  header { padding:18px 24px; border-bottom:1px solid var(--line); display:flex;
+           align-items:center; gap:12px; }
+  header h1 { font-size:18px; margin:0; font-weight:600; letter-spacing:.3px; }
+  .badge { font-size:12px; color:var(--mut); }
+  .live { display:none; align-items:center; gap:6px; font-size:12px; color:var(--green); }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--green);
+         animation:pulse 1.4s infinite; }
+  @keyframes pulse { 0%{opacity:1} 50%{opacity:.3} 100%{opacity:1} }
+  .wrap { display:grid; grid-template-columns:360px 1fr; gap:0; height:calc(100vh - 59px); }
+  .left { border-right:1px solid var(--line); padding:20px; overflow-y:auto; }
+  .right { padding:20px; display:flex; flex-direction:column; }
+  label { font-size:12px; color:var(--mut); display:block; margin:14px 0 6px; }
+  input, textarea { width:100%; background:var(--panel); border:1px solid var(--line);
+         color:var(--txt); border-radius:8px; padding:10px 12px; font-size:14px; }
+  textarea { resize:vertical; min-height:60px; }
+  button { cursor:pointer; border:none; border-radius:8px; padding:10px 14px;
+           font-size:14px; font-weight:600; color:#fff; background:var(--accent); }
+  button.sec { background:#2a2d36; }
+  button.danger { background:var(--red); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .row { display:flex; gap:8px; margin-top:12px; }
+  .row button { flex:1; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+          padding:14px; margin-top:16px; font-size:13px; line-height:1.5; }
+  .card h3 { margin:0 0 8px; font-size:12px; color:var(--mut); text-transform:uppercase;
+             letter-spacing:.5px; }
+  .feed { flex:1; overflow-y:auto; background:var(--panel); border:1px solid var(--line);
+          border-radius:10px; padding:16px; }
+  .turn { margin-bottom:12px; font-size:14px; line-height:1.45; }
+  .turn .who { font-size:11px; color:var(--mut); text-transform:uppercase;
+               letter-spacing:.5px; margin-bottom:2px; }
+  .turn.bot .who { color:var(--accent); }
+  .turn.bot .msg { color:#cdd6ff; }
+  .empty { color:var(--mut); font-size:13px; text-align:center; margin-top:40px; }
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px;
+          color:var(--mut); word-break:break-all; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🤖 CloserAI</h1>
+  <span class="badge">Autonomous AI Sales Agent</span>
+  <span class="live" id="live"><span class="dot"></span> LIVE — bot in call</span>
+</header>
+
+<div class="wrap">
+  <!-- LEFT: controls -->
+  <div class="left">
+    <label>Google Meet link</label>
+    <input id="meet" placeholder="https://meet.google.com/abc-defg-hij" />
+    <label>Contact email</label>
+    <input id="email" value="john@northwind.io" />
+    <div class="row">
+      <button id="startBtn" onclick="startCall()">Start Call</button>
+    </div>
+
+    <div class="card" id="ctxCard" style="display:none">
+      <h3>Pre-call brief</h3>
+      <div id="brief"></div>
+    </div>
+
+    <div class="card" id="liveCard" style="display:none">
+      <h3>Live controls</h3>
+      <div class="mono" id="botId"></div>
+      <label>Make the bot say (optional prompt)</label>
+      <textarea id="sayPrompt" placeholder="e.g. Greet John and mention his funding news"></textarea>
+      <div class="row">
+        <button class="sec" onclick="say()">Speak</button>
+      </div>
+      <div class="row">
+        <button class="danger" onclick="endCall()">End call + update CRM</button>
+      </div>
+      <div class="row">
+        <button class="sec" onclick="leaveCall()">Just leave (no CRM)</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: live transcript -->
+  <div class="right">
+    <h3 style="margin:0 0 12px; font-size:12px; color:var(--mut); text-transform:uppercase; letter-spacing:.5px;">Live conversation</h3>
+    <div class="feed" id="feed">
+      <div class="empty" id="emptyMsg">Start a call to see the live conversation…</div>
+    </div>
+  </div>
+</div>
+
+<script>
+let botId = null;
+let poll = null;
+
+async function startCall() {
+  const meeting_url = document.getElementById('meet').value.trim();
+  const contact_email = document.getElementById('email').value.trim();
+  if (!meeting_url) { alert('Enter a Google Meet link'); return; }
+  const btn = document.getElementById('startBtn');
+  btn.disabled = true; btn.textContent = 'Joining…';
+  try {
+    const r = await fetch('/start-call', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ meeting_url, contact_email })
+    });
+    const data = await r.json();
+    if (data.error) { alert(data.error); return; }
+    botId = data.bot_id;
+    document.getElementById('brief').textContent = data.brief || '(no brief)';
+    document.getElementById('ctxCard').style.display = 'block';
+    document.getElementById('liveCard').style.display = 'block';
+    document.getElementById('botId').textContent = 'bot: ' + botId + '  ·  ' + data.mode;
+    document.getElementById('live').style.display = 'flex';
+    document.getElementById('emptyMsg').textContent = 'Bot joining — admit it in the Meet, then talk.';
+    startPolling();
+  } catch (e) { alert('Failed: ' + e); }
+  finally { btn.disabled = false; btn.textContent = 'Start Call'; }
+}
+
+function startPolling() {
+  if (poll) clearInterval(poll);
+  poll = setInterval(refreshFeed, 2000);
+}
+
+async function refreshFeed() {
+  if (!botId) return;
+  try {
+    const r = await fetch('/history/' + botId);
+    const data = await r.json();
+    // Call ended server-side (auto goodbye / wrap-up) — stop polling cleanly.
+    if (data.active === false) {
+      finishCall('Call ended — CRM updated (note, deal, task, transcript).');
+      return;
+    }
+    const feed = document.getElementById('feed');
+    const hist = data.history || [];
+    if (!hist.length) return;
+    feed.innerHTML = hist.map(line => {
+      const isBot = line.startsWith('CloserAI:');
+      const idx = line.indexOf(':');
+      const who = line.slice(0, idx);
+      const msg = line.slice(idx + 1).trim();
+      return `<div class="turn ${isBot?'bot':''}"><div class="who">${who}</div><div class="msg">${msg}</div></div>`;
+    }).join('');
+    feed.scrollTop = feed.scrollHeight;
+  } catch (e) {}
+}
+
+async function say() {
+  if (!botId) return;
+  const prompt = document.getElementById('sayPrompt').value.trim();
+  if (!prompt) return;
+  await fetch('/say/' + botId, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ prompt })
+  });
+  document.getElementById('sayPrompt').value = '';
+  setTimeout(refreshFeed, 1500);
+}
+
+async function endCall() {
+  if (!botId) return;
+  if (!confirm('End the call and update the CRM?')) return;
+  await fetch('/end-call/' + botId, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ summary: 'Call ended from dashboard.' })
+  });
+  finishCall('Call ended — CRM updated (note, deal, task, transcript).');
+}
+
+async function leaveCall() {
+  if (!botId) return;
+  await fetch('/leave/' + botId, { method:'POST' });
+  finishCall('Bot left the call.');
+}
+
+function finishCall(msg) {
+  if (poll) clearInterval(poll);
+  document.getElementById('live').style.display = 'none';
+  document.getElementById('liveCard').style.display = 'none';
+  document.getElementById('emptyMsg').textContent = msg;
+  botId = null;
+}
+</script>
+</body>
+</html>

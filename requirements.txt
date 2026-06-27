@@ -1,0 +1,7 @@
+# CRM component dependencies
+mcp
+google-genai
+fastapi
+uvicorn[standard]
+python-dotenv
+tavily-python

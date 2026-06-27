@@ -1,0 +1,9 @@
+# Secrets
+.env
+.attio_mcp_token.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
