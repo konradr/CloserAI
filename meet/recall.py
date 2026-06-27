@@ -48,6 +48,12 @@ async def create_bot(meeting_url: str, webhook_url: str | None = None, bot_name:
         "automatic_audio_output": {
             "in_call_recording": {"data": {"kind": "mp3", "b64_data": silent_b64}}
         },
+        # Auto-leave so the bot never lingers: 20s after everyone else leaves,
+        # and after 5 min of silence (once the call has been going ~20 min).
+        "automatic_leave": {
+            "everyone_left_timeout": {"timeout": 20, "activate_after": 30},
+            "silence_detection": {"timeout": 300, "activate_after": 1200},
+        },
     }
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(f"{BASE}/bot/", headers=HEADERS, json=payload)

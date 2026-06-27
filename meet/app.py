@@ -19,6 +19,7 @@ When the call ends:
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 import httpx
@@ -47,7 +48,10 @@ _FAST_SYS = (
     "with exactly: [SILENT].\n"
     "Most turns need NO tools — answer directly from the context. Only call "
     "web_research for fresh external facts (news, funding, a competitor), or "
-    "crm_lookup for a specific CRM detail that is NOT already in the context."
+    "crm_lookup for a specific CRM detail that is NOT already in the context. "
+    "Call end_call ONLY when the conversation is clearly over — the prospect says "
+    "goodbye, agrees on next steps and is leaving, or asks to end — passing a one-"
+    "line summary of the outcome. After calling it, say a brief warm goodbye."
 )
 _FAST_TOOLS = [
     types.Tool(
@@ -77,6 +81,22 @@ _FAST_TOOLS = [
                     "type": "OBJECT",
                     "properties": {"question": {"type": "STRING"}},
                     "required": ["question"],
+                },
+            ),
+            types.FunctionDeclaration(
+                name="end_call",
+                description=(
+                    "End the call and trigger autonomous CRM wrap-up (log note, "
+                    "advance the deal, create a follow-up task, save transcript). "
+                    "Call ONLY when the conversation is clearly finished."
+                ),
+                parameters={
+                    "type": "OBJECT",
+                    "properties": {
+                        "summary": {"type": "STRING", "description": "One-line call outcome"},
+                        "task": {"type": "STRING", "description": "Follow-up task to create"},
+                    },
+                    "required": ["summary"],
                 },
             ),
         ]
@@ -133,6 +153,13 @@ async def fast_reply(session: dict, user_text: str) -> str:
                 out = await research_company(args.get("company", ""), args.get("name")) or "(no results)"
             elif c.name == "crm_lookup":
                 out = await _crm_lookup(args.get("question", ""), session)
+            elif c.name == "end_call":
+                # Flag the call for autonomous wrap-up; speak a goodbye first.
+                session["_pending_end"] = {
+                    "summary": args.get("summary") or "Call ended.",
+                    "task": args.get("task") or "Send proposal and pricing",
+                }
+                out = "Acknowledged. Say a brief, warm one-line goodbye now."
             else:
                 out = "(unknown tool)"
             parts.append(types.Part.from_function_response(name=c.name, response={"result": out}))
@@ -183,7 +210,7 @@ async def start_call(req: StartCall) -> dict:
     # 2. Send the bot to the meeting. Real-time transcript only if PUBLIC_URL is set.
     webhook = f"{PUBLIC_URL.rstrip('/')}/webhook/transcript" if PUBLIC_URL else None
     bot_id = await recall.create_bot(req.meeting_url, webhook, BOT_NAME)
-    sessions[bot_id] = {"email": req.contact_email, "brief": brief, "history": []}
+    sessions[bot_id] = {"email": req.contact_email, "brief": brief, "history": [], "bot_id": bot_id}
     mode = "live-transcript" if webhook else "trigger-to-speak (localhost)"
     print(f"[meet] bot {bot_id} joining {req.meeting_url} [{mode}]")
     return {"bot_id": bot_id, "brief": brief, "mode": mode}
@@ -217,6 +244,14 @@ async def get_history(bot_id: str) -> dict:
     """Inspect the running conversation memory for a call."""
     session = sessions.get(bot_id, {})
     return {"bot_id": bot_id, "history": session.get("history", [])}
+
+
+@app.post("/leave/{bot_id}")
+async def leave(bot_id: str) -> dict:
+    """Force the bot to leave the meeting immediately (no CRM writes)."""
+    await recall.leave_call(bot_id)
+    sessions.pop(bot_id, None)
+    return {"left": bot_id}
 
 
 @app.post("/webhook/transcript")
@@ -256,9 +291,20 @@ async def _handle_utterance(bot_id: str, speaker: str, sentence: str) -> None:
     audio = await slng.synthesize_mp3(answer)
     await recall.output_audio(bot_id, audio)
 
+    # If the agent decided the call is over, let the goodbye play, then wrap up.
+    pending = session.pop("_pending_end", None)
+    if pending is not None:
+        await asyncio.sleep(4)  # let the goodbye audio finish
+        await _wrap_up_call(bot_id, pending["summary"], pending["task"])
+
 
 @app.post("/end-call/{bot_id}")
 async def end_call(bot_id: str, req: EndCall) -> dict:
+    return await _wrap_up_call(bot_id, req.summary, req.task)
+
+
+async def _wrap_up_call(bot_id: str, summary: str, task: str = "Send proposal and pricing") -> dict:
+    """Autonomous end-of-call: summary note + deal advance + task + full transcript, then leave."""
     session = sessions.get(bot_id, {})
     email = session.get("email")
     history: list[str] = session.get("history", [])
@@ -269,7 +315,7 @@ async def end_call(bot_id: str, req: EndCall) -> dict:
             # 1. Summary note + deal advance + follow-up task.
             r = await client.post(
                 f"{CRM_URL}/crm/post-call",
-                json={"email": email, "summary": req.summary, "task": req.task},
+                json={"email": email, "summary": summary, "task": task},
             )
             result = r.json()
 
@@ -287,5 +333,10 @@ async def end_call(bot_id: str, req: EndCall) -> dict:
 
     await recall.leave_call(bot_id)
     sessions.pop(bot_id, None)
+    print(
+        f"[meet] END CALL {bot_id} | bot left | "
+        f"crm: {result.get('answer', result)} | "
+        f"transcript_saved={transcript_saved} | turns={len(history)}"
+    )
     return {"bot_id": bot_id, "crm": result, "transcript_saved": transcript_saved,
             "turns": len(history)}
