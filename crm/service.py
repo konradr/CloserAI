@@ -46,6 +46,13 @@ class AskRequest(BaseModel):
     query: str
 
 
+class PostCallRequest(BaseModel):
+    email: str
+    summary: str
+    task: str = "Send proposal and pricing"
+    outcome: str = "well"
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok", "tools": _agent.tools if _agent else []}
@@ -61,11 +68,35 @@ async def crm_context(email: str) -> dict:
         return {"email": email, "brief": None, "error": str(exc)[:300]}
 
 
+@app.get("/crm/precall")
+async def crm_precall(email: str, research: bool = True) -> dict:
+    """Pre-call package: CRM brief + Tavily web intel on the company."""
+    try:
+        async with _lock:
+            result = await _agent.precall(email, research=research)
+        return {"email": email, **result}
+    except Exception as exc:  # noqa: BLE001
+        return {"email": email, "brief": None, "web_intel": "", "error": str(exc)[:300]}
+
+
 @app.post("/crm/ask")
 async def crm_ask(req: AskRequest) -> dict:
     try:
         async with _lock:
             result = await _agent.ask(req.query)
+        return {"answer": result["answer"], "tool_calls": result["tool_calls"]}
+    except Exception as exc:  # noqa: BLE001
+        return {"answer": None, "tool_calls": [], "error": str(exc)[:300]}
+
+
+@app.post("/crm/post-call")
+async def crm_post_call(req: PostCallRequest) -> dict:
+    """Autonomous post-call wrap-up: note + deal-stage advance + follow-up task."""
+    try:
+        async with _lock:
+            result = await _agent.post_call(
+                req.email, req.summary, req.task, req.outcome
+            )
         return {"answer": result["answer"], "tool_calls": result["tool_calls"]}
     except Exception as exc:  # noqa: BLE001
         return {"answer": None, "tool_calls": [], "error": str(exc)[:300]}

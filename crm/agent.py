@@ -14,6 +14,7 @@ knowing anything about MCP, OAuth, or Attio's API.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import os
 import re
@@ -38,7 +39,20 @@ CONTEXT_PROMPT = (
     "Give me a tight pre-call CRM brief for the contact with email {email}. "
     "Search the CRM, then return: who they are (name, title, company), their "
     "open deals (name, stage, value), and the single most important recent note. "
-    "If there is no record, say so. Keep it under 120 words, plain text."
+    "If there is no record, say so. Keep it under 120 words, plain text. "
+    "On the VERY LAST line add exactly: COMPANY=<their company name> (or COMPANY=unknown)."
+)
+
+POST_CALL_PROMPT = (
+    "The call with {email} just ended and went {outcome}. You MUST complete ALL "
+    "THREE actions below in Attio, in order. Do not stop or give a final answer "
+    "until all three are done:\n"
+    "1. create-note on the person record summarising: {summary}\n"
+    "2. Advance their deal to the next stage toward closing. First look up the "
+    "deal and its valid stage options, then update-record the stage.\n"
+    "3. create-task: a follow-up titled '{task}', due in 2 days, linked to the "
+    "deal (object 'deals' + the deal record_id).\n"
+    "After all three succeed, confirm in ONE short sentence exactly what you did."
 )
 
 
@@ -88,10 +102,32 @@ class CRMAgent:
         await self._session.initialize()
         tools = await self._session.list_tools()
         self._tool_names = [t.name for t in tools.tools]
+        genai_tools = mcp_tools_to_genai(tools.tools, types)
+        # Add a local Tavily web-research tool the agent can call mid-call.
+        genai_tools[0].function_declarations.append(
+            types.FunctionDeclaration(
+                name="web_research",
+                description=(
+                    "Search the public web (Tavily) for fresh intel about a company "
+                    "or person — recent news, funding, competitors. Use this during a "
+                    "call when a company, competitor, or current event comes up that "
+                    "isn't in the CRM."
+                ),
+                parameters={
+                    "type": "OBJECT",
+                    "properties": {
+                        "company": {"type": "STRING", "description": "Company to research"},
+                        "name": {"type": "STRING", "description": "Optional person name"},
+                    },
+                    "required": ["company"],
+                },
+            )
+        )
+        self._tool_names.append("web_research")
         self._config = types.GenerateContentConfig(
             temperature=0,
             system_instruction=SYSTEM_PROMPT,
-            tools=mcp_tools_to_genai(tools.tools, types),
+            tools=genai_tools,
         )
 
     async def _safe_close_stack(self) -> None:
@@ -148,7 +184,109 @@ class CRMAgent:
     async def get_context(self, email: str) -> str:
         """Return a concise CRM brief for a contact (for pre-call use)."""
         result = await self.ask(CONTEXT_PROMPT.format(email=email))
-        return result["answer"]
+        brief, _company = self._split_company(result["answer"])
+        return brief
+
+    async def precall(self, email: str, research: bool = True) -> dict:
+        """Full pre-call package: CRM brief + (optional) Tavily web intel.
+
+        Returns {"brief": str, "company": str, "web_intel": str}.
+        """
+        result = await self.ask(CONTEXT_PROMPT.format(email=email))
+        brief, company = self._split_company(result["answer"])
+        web_intel = ""
+        if research and company and company.lower() != "unknown":
+            from .research import research_company
+            web_intel = await research_company(company)
+        return {"brief": brief, "company": company, "web_intel": web_intel}
+
+    @staticmethod
+    def _split_company(answer: str) -> tuple[str, str]:
+        """Pull the trailing 'COMPANY=...' marker out of the brief."""
+        company = ""
+        lines = (answer or "").splitlines()
+        kept = []
+        for line in lines:
+            if line.strip().upper().startswith("COMPANY="):
+                company = line.split("=", 1)[1].strip()
+            else:
+                kept.append(line)
+        return "\n".join(kept).strip(), company
+
+    async def post_call(
+        self,
+        email: str,
+        summary: str,
+        task: str = "Send proposal and pricing",
+        outcome: str = "well",
+    ) -> dict:
+        """Autonomous post-call wrap-up: note + deal-stage advance + follow-up task.
+
+        The note and stage advance are driven by the model; the follow-up task is
+        created deterministically so it is never skipped.
+        """
+        result = await self.ask(
+            POST_CALL_PROMPT.format(
+                email=email, summary=summary, task=task, outcome=outcome
+            )
+        )
+
+        # Deterministic follow-up task — don't rely on the model remembering it.
+        # Skip if the model already created one this turn (avoid duplicates).
+        already_created = any(c.get("name") == "create-task" for c in result["tool_calls"])
+        person_id = self._person_id_from_calls(result["tool_calls"]) or \
+            await self._find_record_id("people", email)
+        if not already_created and person_id:
+            deadline = (
+                datetime.date.today() + datetime.timedelta(days=2)
+            ).isoformat() + "T09:00:00.000Z"
+            try:
+                await self._session.call_tool(
+                    "create-task",
+                    {
+                        "content": task,
+                        "deadline_at": deadline,
+                        "linked_record_object": "people",
+                        "linked_record_id": person_id,
+                    },
+                )
+                result["tool_calls"].append(
+                    {"name": "create-task", "args": {"content": task, "linked_record_id": person_id}}
+                )
+                if "task" not in (result["answer"] or "").lower():
+                    base = (result["answer"] or "").strip().rstrip(".")
+                    result["answer"] = (
+                        f"{base}. Created a follow-up task: '{task}'.".lstrip(". ").strip()
+                    )
+            except Exception as exc:  # noqa: BLE001
+                result["answer"] = (result["answer"] or "") + f" (task creation failed: {exc})"
+        return result
+
+    @staticmethod
+    def _person_id_from_calls(calls: list[dict]) -> str | None:
+        """Pull the person record_id from a create-note call made during this turn."""
+        for c in calls:
+            if c.get("name") == "create-note":
+                rid = c.get("args", {}).get("parent_record_id")
+                if rid:
+                    return rid
+        return None
+
+    async def _find_record_id(self, object_: str, query: str) -> str | None:
+        """Resolve a record_id via MCP search-records (parses the first UUID)."""
+        try:
+            res = await self._session.call_tool(
+                "search-records", {"object": object_, "query": query}
+            )
+            text = "\n".join(
+                c.text for c in res.content if getattr(c, "type", None) == "text"
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        m = re.search(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", text
+        )
+        return m.group(0) if m else None
 
     async def ask(self, query: str, history: list | None = None) -> dict:
         """
@@ -164,7 +302,7 @@ class CRMAgent:
         convo.append(types.Content(role="user", parts=[types.Part(text=query)]))
         tool_calls: list[dict] = []
 
-        for _ in range(8):  # cap tool-call rounds
+        for _ in range(14):  # cap tool-call rounds (multi-action flows need headroom)
             resp = await self._generate_with_retry(convo)
             candidate = resp.candidates[0] if resp.candidates else None
             if candidate and candidate.content:
@@ -172,18 +310,35 @@ class CRMAgent:
 
             calls = resp.function_calls or []
             if not calls:
-                return {"answer": resp.text or "", "tool_calls": tool_calls, "history": convo}
+                answer = resp.text or ""
+                # If the model finished silently after doing work, force a confirmation.
+                if not answer.strip() and tool_calls:
+                    convo.append(
+                        types.Content(
+                            role="user",
+                            parts=[types.Part(text="Confirm in one short sentence exactly what you changed in Attio.")],
+                        )
+                    )
+                    followup = await self._generate_with_retry(convo)
+                    answer = (followup.text or "").strip() or "Done."
+                return {"answer": answer, "tool_calls": tool_calls, "history": convo}
 
             tool_parts = []
             for call in calls:
                 args = dict(call.args) if call.args else {}
                 tool_calls.append({"name": call.name, "args": args})
                 try:
-                    result = await self._session.call_tool(call.name, args)
-                    output = "\n".join(
-                        c.text for c in result.content
-                        if getattr(c, "type", None) == "text"
-                    ) or "(no content)"
+                    if call.name == "web_research":
+                        from .research import research_company
+                        output = await research_company(
+                            args.get("company", ""), args.get("name")
+                        ) or "(no web results)"
+                    else:
+                        result = await self._session.call_tool(call.name, args)
+                        output = "\n".join(
+                            c.text for c in result.content
+                            if getattr(c, "type", None) == "text"
+                        ) or "(no content)"
                 except Exception as exc:  # noqa: BLE001
                     output = f"ERROR: {exc}"
                 tool_parts.append(

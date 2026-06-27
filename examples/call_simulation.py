@@ -54,30 +54,38 @@ def main() -> None:
 
         # 1. PRE-CALL ------------------------------------------------------- #
         _print_header("1. PRE-CALL", f"Bot joins — briefing on {email}")
-        brief = client.get(f"{BASE}/crm/context", params={"email": email}, timeout=120).json()
+        brief = client.get(f"{BASE}/crm/precall", params={"email": email}, timeout=120).json()
+        # /crm/precall returns CRM brief + Tavily web intel.
         print(brief["brief"])
+        if brief.get("web_intel"):
+            print("\n" + brief["web_intel"])
 
         # 2. IN-CALL -------------------------------------------------------- #
-        _print_header("2. IN-CALL", "Prospect raises a pricing objection")
+        _print_header("2. IN-CALL", "Prospect mentions recent news + a competitor")
         result = _ask(
             client,
-            f"On a live call with {email}. They said our competitor is cheaper. "
-            "Based on what's in the CRM about this deal, give me one concise, "
-            "persuasive talking point I can say out loud right now.",
+            f"On a live call with {email}. The prospect just said they recently "
+            "had some big company news and are also evaluating a cheaper competitor. "
+            "Look up fresh web intel on their company if useful, then give me ONE "
+            "concise, personalised talking point I can say out loud right now.",
         )
         print(f"\n🗣️  Agent says: {result['answer']}")
         _show_calls(result)
 
         # 3. POST-CALL ------------------------------------------------------ #
         _print_header("3. POST-CALL", "Autonomous CRM update")
-        result = _ask(
-            client,
-            f"The call with {email} just ended and went well. Do all of this in Attio: "
-            "1) Log a note summarising that the prospect was impressed by the live demo "
-            "and is ready to move forward. "
-            "2) Advance their deal stage to the next stage toward closing. "
-            "3) Create a follow-up task to send the proposal in 2 days.",
+        resp = client.post(
+            f"{BASE}/crm/post-call",
+            json={
+                "email": email,
+                "summary": "Prospect was impressed by the live demo and is ready to move forward.",
+                "task": "Send proposal and pricing",
+                "outcome": "well",
+            },
+            timeout=180,
         )
+        resp.raise_for_status()
+        result = resp.json()
         print(f"\n✅ Agent did: {result['answer']}")
         _show_calls(result)
 
