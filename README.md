@@ -10,6 +10,15 @@ DEMO: https://youtu.be/r82SDw72QnI
 
 ---
 
+## Demo
+
+<video src="https://github.com/konradr/CloserAI/raw/dev/docs/demo.mp4" controls width="100%"></video>
+
+> If the player above doesn't load, [download / watch the demo here](docs/demo.mp4).
+
+
+---
+
 ## What it does
 
 1. **Pre-call** — given a prospect's email, it builds a brief from the CRM (Attio) and live web research (Tavily) before the bot even joins.
@@ -253,3 +262,8 @@ CloserAI/
 ## Tech
 
 FastAPI · httpx · Attio MCP (OAuth) · `google-genai` (Gemini 2.5 Flash) · Tavily · Recall.ai · SLNG · ffmpeg · cloudflared
+
+## Pitch submitted at the hackathon
+
+Original pitch video submitted at the Hackathon: [https://youtu.be/r82SDw72QnI](https://youtu.be/r82SDw72QnI)
+
