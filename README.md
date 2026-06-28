@@ -8,6 +8,14 @@ CloserAI drops into a Google Meet as a real participant. It listens to the conve
 
 ---
 
+## Demo
+
+<video src="https://github.com/konradr/CloserAI/raw/dev/docs/demo.mp4" controls width="100%"></video>
+
+> If the player above doesn't load, [download / watch the demo here](docs/demo.mp4).
+
+---
+
 ## What it does
 
 1. **Pre-call** — given a prospect's email, it builds a brief from the CRM (Attio) and live web research (Tavily) before the bot even joins.
