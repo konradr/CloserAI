@@ -14,6 +14,7 @@ CloserAI drops into a Google Meet as a real participant. It listens to the conve
 
 > If the player above doesn't load, [download / watch the demo here](docs/demo.mp4).
 
+
 ---
 
 ## What it does
@@ -259,3 +260,8 @@ CloserAI/
 ## Tech
 
 FastAPI · httpx · Attio MCP (OAuth) · `google-genai` (Gemini 2.5 Flash) · Tavily · Recall.ai · SLNG · ffmpeg · cloudflared
+
+## Pitch submitted at the hackathon
+
+Original pitch video submitted at the Hackathon: [https://youtu.be/r82SDw72QnI](https://youtu.be/r82SDw72QnI)
+
