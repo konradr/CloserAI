@@ -6,8 +6,6 @@ Built at the Tech:Europe London AI Hackathon.
 
 CloserAI drops into a Google Meet as a real participant. It listens to the conversation, reasons with Gemini, speaks back with a natural voice, looks up live web intel and CRM facts mid-call, and — when the call wraps up — logs a note, advances the deal, creates a follow-up task, and saves the full transcript to the CRM. Zero clicks.
 
-DEMO: https://youtu.be/r82SDw72QnI
-
 ---
 
 ## Demo
